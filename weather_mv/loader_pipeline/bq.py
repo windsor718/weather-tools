@@ -186,29 +186,36 @@ class ToBigQuery(ToDataSink):
                 logger.warning("Assumes that equal distance between consecutive points of latitude "
                                "and longitude for the entire grid.")
                 # Find the grid_resolution.
-                if open_ds['latitude'].size > 1 and open_ds['longitude'].size > 1:
-                    latitude_length = len(open_ds['latitude'])
-                    longitude_length = len(open_ds['longitude'])
+                if open_ds['lat'].size > 1 and open_ds['lon'].size > 1:
+                    latitude_length = len(open_ds['lat'])
+                    longitude_length = len(open_ds['lon'])
 
-                    latitude_range = np.ptp(open_ds["latitude"].values)
-                    longitude_range = np.ptp(open_ds["longitude"].values)
+                    latitude_range = np.ptp(open_ds["lat"].values)
+                    longitude_range = np.ptp(open_ds["lon"].values)
 
-                    self.lat_grid_resolution = abs(latitude_range / latitude_length) / 2
-                    self.lon_grid_resolution = abs(longitude_range / longitude_length) / 2
+                    self.lat_grid_resolution = abs(
+                        latitude_range / latitude_length) / 2
+                    self.lon_grid_resolution = abs(
+                        longitude_range / longitude_length) / 2
 
                 else:
                     self.skip_creating_polygon = True
-                    logger.warning("Polygon can't be genereated as provided dataset has a only single grid point.")
+                    logger.warning(
+                        "Polygon can't be genereated as provided dataset has a only single grid point."
+                    )
             else:
-                logger.info("Polygon is not created as '--skip_creating_polygon' flag passed.")
+                logger.info(
+                    "Polygon is not created as '--skip_creating_polygon' flag passed."
+                )
 
             # Define table from user input
-            if self.variables and not self.infer_schema and not open_ds.attrs['is_normalized']:
+            if self.variables and not self.infer_schema and not open_ds.attrs[
+                    'is_normalized']:
                 logger.info('Creating schema from input variables.')
                 table_schema = to_table_schema(
-                    [('latitude', 'FLOAT64'), ('longitude', 'FLOAT64'), ('time', 'TIMESTAMP')] +
-                    [(var, 'FLOAT64') for var in self.variables]
-                )
+                    [('lat', 'FLOAT64'), ('lon',
+                                          'FLOAT64'), ('time', 'TIMESTAMP')] +
+                    [(var, 'FLOAT64') for var in self.variables])
             else:
                 logger.info('Inferring schema from data.')
                 ds: xr.Dataset = _only_target_vars(open_ds, self.variables)
@@ -227,39 +234,52 @@ class ToBigQuery(ToDataSink):
             logger.error(f'Unable to create table in BigQuery: {e}')
             raise
 
-    def prepare_coordinates(self, uri: str) -> t.Iterator[t.Tuple[str, t.List[t.Dict]]]:
+    def prepare_coordinates(
+            self, uri: str) -> t.Iterator[t.Tuple[str, t.List[t.Dict]]]:
         """Open the dataset, filter by area, and prepare chunks of coordinates for parallel ingestion into BigQuery."""
         logger.info(f'Preparing coordinates for: {uri!r}.')
 
-        with open_dataset(uri, self.xarray_open_dataset_kwargs, self.disable_grib_schema_normalization,
-                          self.tif_metadata_for_start_time, self.tif_metadata_for_end_time, is_zarr=self.zarr) as ds:
+        with open_dataset(uri,
+                          self.xarray_open_dataset_kwargs,
+                          self.disable_grib_schema_normalization,
+                          self.tif_metadata_for_start_time,
+                          self.tif_metadata_for_end_time,
+                          is_zarr=self.zarr) as ds:
             data_ds: xr.Dataset = _only_target_vars(ds, self.variables)
             if self.area:
                 n, w, s, e = self.area
-                data_ds = data_ds.sel(latitude=slice(n, s), longitude=slice(w, e))
+                data_ds = data_ds.sel(lat=slice(n, s), lon=slice(w, e))
                 logger.info(f'Data filtered by area, size: {data_ds.nbytes}')
 
-            for chunk in ichunked(get_coordinates(data_ds, uri), self.coordinate_chunk_size):
+            for chunk in ichunked(get_coordinates(data_ds, uri),
+                                  self.coordinate_chunk_size):
                 yield uri, list(chunk)
 
-    def extract_rows(self, uri: str, coordinates: t.List[t.Dict]) -> t.Iterator[t.Dict]:
+    def extract_rows(self, uri: str,
+                     coordinates: t.List[t.Dict]) -> t.Iterator[t.Dict]:
         """Reads an asset and coordinates, then yields its rows as a mapping of column names to values."""
-        logger.info(f'Extracting rows for [{coordinates[0]!r}...{coordinates[-1]!r}] of {uri!r}.')
+        logger.info(
+            f'Extracting rows for [{coordinates[0]!r}...{coordinates[-1]!r}] of {uri!r}.'
+        )
 
         # Re-calculate import time for streaming extractions.
         if not self.import_time:
-            self.import_time = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+            self.import_time = datetime.datetime.utcnow().replace(
+                tzinfo=datetime.timezone.utc)
 
-        with open_dataset(uri, self.xarray_open_dataset_kwargs, self.disable_grib_schema_normalization,
-                          self.tif_metadata_for_start_time, self.tif_metadata_for_end_time, is_zarr=self.zarr) as ds:
+        with open_dataset(uri,
+                          self.xarray_open_dataset_kwargs,
+                          self.disable_grib_schema_normalization,
+                          self.tif_metadata_for_start_time,
+                          self.tif_metadata_for_end_time,
+                          is_zarr=self.zarr) as ds:
             data_ds: xr.Dataset = _only_target_vars(ds, self.variables)
             yield from self.to_rows(coordinates, data_ds, uri)
 
-    def to_rows(self, coordinates: t.Iterable[t.Dict], ds: xr.Dataset, uri: str) -> t.Iterator[t.Dict]:
-        first_ts_raw = (
-            ds.time[0].values if isinstance(ds.time.values, np.ndarray)
-            else ds.time.values
-        )
+    def to_rows(self, coordinates: t.Iterable[t.Dict], ds: xr.Dataset,
+                uri: str) -> t.Iterator[t.Dict]:
+        first_ts_raw = (ds.time[0].values if isinstance(
+            ds.time.values, np.ndarray) else ds.time.values)
         first_time_step = to_json_serializable_type(first_ts_raw)
         for it in coordinates:
             # Use those index values to select a Dataset containing one row of data.
@@ -267,8 +287,11 @@ class ToBigQuery(ToDataSink):
 
             # Create a Name-Value map for data columns. Result looks like:
             # {'d': -2.0187, 'cc': 0.007812, 'z': 50049.8, 'rr': None}
-            row = {n: to_json_serializable_type(ensure_us_time_resolution(v.values))
-                   for n, v in row_ds.data_vars.items()}
+            row = {
+                n:
+                to_json_serializable_type(ensure_us_time_resolution(v.values))
+                for n, v in row_ds.data_vars.items()
+            }
 
             # Serialize coordinates.
             it = {k: to_json_serializable_type(v) for k, v in it.items()}
@@ -278,20 +301,20 @@ class ToBigQuery(ToDataSink):
             # Add un-indexed coordinates.
             for c in row_ds.coords:
                 if c not in it and (not self.variables or c in self.variables):
-                    row[c] = to_json_serializable_type(ensure_us_time_resolution(row_ds[c].values))
+                    row[c] = to_json_serializable_type(
+                        ensure_us_time_resolution(row_ds[c].values))
 
             # Add import metadata.
             row[DATA_IMPORT_TIME_COLUMN] = self.import_time
             row[DATA_URI_COLUMN] = uri
             row[DATA_FIRST_STEP] = first_time_step
 
-            longitude = ((row['longitude'] + 180) % 360) - 180
-            row[GEO_POINT_COLUMN] = fetch_geo_point(row['latitude'], longitude)
-            row[GEO_POLYGON_COLUMN] = (
-                fetch_geo_polygon(row["latitude"], longitude, self.lat_grid_resolution, self.lon_grid_resolution)
-                if not self.skip_creating_polygon
-                else None
-            )
+            longitude = ((row['lon'] + 180) % 360) - 180
+            row[GEO_POINT_COLUMN] = fetch_geo_point(row['lat'], longitude)
+            row[GEO_POLYGON_COLUMN] = (fetch_geo_polygon(
+                row["lat"], longitude, self.lat_grid_resolution,
+                self.lon_grid_resolution) if not self.skip_creating_polygon
+                                       else None)
             # 'row' ends up looking like:
             # {'latitude': 88.0, 'longitude': 2.0, 'time': '2015-01-01 06:00:00', 'd': -2.0187, 'cc': 0.007812,
             #  'z': 50049.8, 'data_import_time': '2020-12-05 00:12:02.424573 UTC', ...}
@@ -302,7 +325,8 @@ class ToBigQuery(ToDataSink):
         uri = ds.attrs.get(DATA_URI_COLUMN, '')
         # Re-calculate import time for streaming extractions.
         if not self.import_time or self.zarr:
-            self.import_time = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+            self.import_time = datetime.datetime.utcnow().replace(
+                tzinfo=datetime.timezone.utc)
         yield from self.to_rows(get_coordinates(ds, uri), ds, uri)
 
     def expand(self, paths):
@@ -310,16 +334,17 @@ class ToBigQuery(ToDataSink):
         if not self.zarr:
             extracted_rows = (
                 paths
-                | 'PrepareCoordinates' >> beam.FlatMap(self.prepare_coordinates)
+                |
+                'PrepareCoordinates' >> beam.FlatMap(self.prepare_coordinates)
                 | beam.Reshuffle()
-                | 'ExtractRows' >> beam.FlatMapTuple(self.extract_rows)
-            )
+                | 'ExtractRows' >> beam.FlatMapTuple(self.extract_rows))
         else:
             xarray_open_dataset_kwargs = self.xarray_open_dataset_kwargs.copy()
             xarray_open_dataset_kwargs.pop('chunks')
             start_date = xarray_open_dataset_kwargs.pop('start_date', None)
             end_date = xarray_open_dataset_kwargs.pop('end_date', None)
-            ds, chunks = xbeam.open_zarr(self.first_uri, **xarray_open_dataset_kwargs)
+            ds, chunks = xbeam.open_zarr(self.first_uri,
+                                         **xarray_open_dataset_kwargs)
 
             if start_date is not None and end_date is not None:
                 ds = ds.sel(time=slice(start_date, end_date))
@@ -330,29 +355,35 @@ class ToBigQuery(ToDataSink):
                 | 'OpenChunks' >> xbeam.DatasetToChunks(ds, chunks)
                 | 'ExtractRows' >> beam.FlatMapTuple(self.chunks_to_rows)
                 | 'Window' >> beam.WindowInto(window.FixedWindows(60))
-                | 'AddTimestamp' >> beam.Map(timestamp_row)
-            )
+                | 'AddTimestamp' >> beam.Map(timestamp_row))
 
         if self.dry_run:
             return extracted_rows | 'Log Rows' >> beam.Map(logger.info)
-        return (
-            extracted_rows
-            | 'WriteToBigQuery' >> WriteToBigQuery(
-                project=self.table.project,
-                dataset=self.table.dataset_id,
-                table=self.table.table_id,
-                write_disposition=BigQueryDisposition.WRITE_APPEND,
-                create_disposition=BigQueryDisposition.CREATE_NEVER)
-        )
+        return (extracted_rows
+                | 'WriteToBigQuery' >> WriteToBigQuery(
+                    project=self.table.project,
+                    dataset=self.table.dataset_id,
+                    table=self.table.table_id,
+                    write_disposition=BigQueryDisposition.WRITE_APPEND,
+                    create_disposition=BigQueryDisposition.CREATE_NEVER))
 
 
 def map_dtype_to_sql_type(var_type: np.dtype) -> str:
     """Maps a np.dtype to a suitable BigQuery column type."""
-    if var_type in {np.dtype('float64'), np.dtype('float32'), np.dtype('timedelta64[ns]')}:
+    if var_type in {
+            np.dtype('float64'),
+            np.dtype('float32'),
+            np.dtype('timedelta64[ns]')
+    }:
         return 'FLOAT64'
     elif var_type in {np.dtype('<M8[ns]')}:
         return 'TIMESTAMP'
-    elif var_type in {np.dtype('int8'), np.dtype('int16'), np.dtype('int32'), np.dtype('int64')}:
+    elif var_type in {
+            np.dtype('int8'),
+            np.dtype('int16'),
+            np.dtype('int32'),
+            np.dtype('int64')
+    }:
         return 'INT64'
     raise ValueError(f"Unknown mapping from '{var_type}' to SQL type")
 
@@ -360,15 +391,14 @@ def map_dtype_to_sql_type(var_type: np.dtype) -> str:
 def dataset_to_table_schema(ds: xr.Dataset) -> t.List[bigquery.SchemaField]:
     """Returns a BigQuery table schema able to store the data in 'ds'."""
     # Get the columns and data types for all variables in the dataframe
-    columns = [
-        (str(col), map_dtype_to_sql_type(ds.variables[col].dtype))
-        for col in ds.variables.keys() if ds.variables[col].size != 0
-    ]
+    columns = [(str(col), map_dtype_to_sql_type(ds.variables[col].dtype))
+               for col in ds.variables.keys() if ds.variables[col].size != 0]
 
     return to_table_schema(columns)
 
 
-def to_table_schema(columns: t.List[t.Tuple[str, str]]) -> t.List[bigquery.SchemaField]:
+def to_table_schema(
+        columns: t.List[t.Tuple[str, str]]) -> t.List[bigquery.SchemaField]:
     # Fields are all Nullable because data may have NANs. We treat these as null.
     fields = [
         bigquery.SchemaField(column, var_type, mode='NULLABLE')
@@ -376,11 +406,18 @@ def to_table_schema(columns: t.List[t.Tuple[str, str]]) -> t.List[bigquery.Schem
     ]
 
     # Add an extra columns for recording import metadata.
-    fields.append(bigquery.SchemaField(DATA_IMPORT_TIME_COLUMN, 'TIMESTAMP', mode='NULLABLE'))
-    fields.append(bigquery.SchemaField(DATA_URI_COLUMN, 'STRING', mode='NULLABLE'))
-    fields.append(bigquery.SchemaField(DATA_FIRST_STEP, 'TIMESTAMP', mode='NULLABLE'))
-    fields.append(bigquery.SchemaField(GEO_POINT_COLUMN, 'GEOGRAPHY', mode='NULLABLE'))
-    fields.append(bigquery.SchemaField(GEO_POLYGON_COLUMN, 'GEOGRAPHY', mode='NULLABLE'))
+    fields.append(
+        bigquery.SchemaField(DATA_IMPORT_TIME_COLUMN,
+                             'TIMESTAMP',
+                             mode='NULLABLE'))
+    fields.append(
+        bigquery.SchemaField(DATA_URI_COLUMN, 'STRING', mode='NULLABLE'))
+    fields.append(
+        bigquery.SchemaField(DATA_FIRST_STEP, 'TIMESTAMP', mode='NULLABLE'))
+    fields.append(
+        bigquery.SchemaField(GEO_POINT_COLUMN, 'GEOGRAPHY', mode='NULLABLE'))
+    fields.append(
+        bigquery.SchemaField(GEO_POLYGON_COLUMN, 'GEOGRAPHY', mode='NULLABLE'))
 
     return fields
 
@@ -401,7 +438,9 @@ def fetch_geo_point(lat: float, long: float) -> str:
     return point
 
 
-def fetch_geo_polygon(latitude: float, longitude: float, lat_grid_resolution: float, lon_grid_resolution: float) -> str:
+def fetch_geo_polygon(latitude: float, longitude: float,
+                      lat_grid_resolution: float,
+                      lon_grid_resolution: float) -> str:
     """Create a Polygon based on latitude, longitude and resolution.
 
     Example ::
@@ -414,18 +453,21 @@ def fetch_geo_polygon(latitude: float, longitude: float, lat_grid_resolution: fl
     To determine the position of the `*` point, we find the `.` point.
     The `get_lat_lon_range` function gives the `.` point and `bound_point` gives the `*` point.
     """
-    lat_lon_bound = bound_point(latitude, longitude, lat_grid_resolution, lon_grid_resolution)
-    polygon = geojson.dumps(geojson.Polygon([[
-        (lat_lon_bound[0][0], lat_lon_bound[0][1]),  # lower_left
-        (lat_lon_bound[1][0], lat_lon_bound[1][1]),  # upper_left
-        (lat_lon_bound[2][0], lat_lon_bound[2][1]),  # upper_right
-        (lat_lon_bound[3][0], lat_lon_bound[3][1]),  # lower_right
-        (lat_lon_bound[0][0], lat_lon_bound[0][1]),  # lower_left
-    ]]))
+    lat_lon_bound = bound_point(latitude, longitude, lat_grid_resolution,
+                                lon_grid_resolution)
+    polygon = geojson.dumps(
+        geojson.Polygon([[
+            (lat_lon_bound[0][0], lat_lon_bound[0][1]),  # lower_left
+            (lat_lon_bound[1][0], lat_lon_bound[1][1]),  # upper_left
+            (lat_lon_bound[2][0], lat_lon_bound[2][1]),  # upper_right
+            (lat_lon_bound[3][0], lat_lon_bound[3][1]),  # lower_right
+            (lat_lon_bound[0][0], lat_lon_bound[0][1]),  # lower_left
+        ]]))
     return polygon
 
 
-def bound_point(latitude: float, longitude: float, lat_grid_resolution: float, lon_grid_resolution: float) -> t.List:
+def bound_point(latitude: float, longitude: float, lat_grid_resolution: float,
+                lon_grid_resolution: float) -> t.List:
     """Calculate the bound point based on latitude, longitude and grid resolution.
 
     Example ::
@@ -439,9 +481,9 @@ def bound_point(latitude: float, longitude: float, lat_grid_resolution: float, l
     lat_in_bound = latitude in [90.0, -90.0]
     lon_in_bound = longitude in [-180.0, 180.0]
 
-    lat_range = get_lat_lon_range(latitude, "latitude", lat_in_bound,
+    lat_range = get_lat_lon_range(latitude, "lat", lat_in_bound,
                                   lat_grid_resolution, lon_grid_resolution)
-    lon_range = get_lat_lon_range(longitude, "longitude", lon_in_bound,
+    lon_range = get_lat_lon_range(longitude, "lon", lon_in_bound,
                                   lat_grid_resolution, lon_grid_resolution)
     lower_left = [lon_range[1], lat_range[1]]
     upper_left = [lon_range[1], lat_range[0]]
@@ -451,7 +493,8 @@ def bound_point(latitude: float, longitude: float, lat_grid_resolution: float, l
 
 
 def get_lat_lon_range(value: float, lat_lon: str, is_point_out_of_bound: bool,
-                      lat_grid_resolution: float, lon_grid_resolution: float) -> t.List:
+                      lat_grid_resolution: float,
+                      lon_grid_resolution: float) -> t.List:
     """Calculate the latitude, longitude point range point latitude, longitude and grid resolution.
 
     Example ::
@@ -462,7 +505,7 @@ def get_lat_lon_range(value: float, lat_lon: str, is_point_out_of_bound: bool,
         * - . - *
     This function gives the `.` point in the above example.
     """
-    if lat_lon == 'latitude':
+    if lat_lon == 'lat':
         if is_point_out_of_bound:
             return [-90 + lat_grid_resolution, 90 - lat_grid_resolution]
         else:
